@@ -48,7 +48,10 @@ impl<S> FromRequestParts<S> for SignedUrl {
 
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
         let path = parts.uri.path();
-        let query_str = parts.uri.query().ok_or((StatusCode::UNAUTHORIZED, "Missing signature"))?;
+        let query_str = parts
+            .uri
+            .query()
+            .ok_or((StatusCode::UNAUTHORIZED, "Missing signature"))?;
 
         let (signature_parts, other_parts): (Vec<_>, Vec<_>) = QString::from(query_str)
             .into_pairs()
@@ -63,7 +66,9 @@ impl<S> FromRequestParts<S> for SignedUrl {
         let query = QString::new(other_parts);
         let unsigned_url = format!("{}{}", path, stringify_query(&query));
 
-        if signature != hmac_sha256(&unsigned_url).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Signing error"))? {
+        if !verify_hmac_sha256(&unsigned_url, signature)
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Signing error"))?
+        {
             return Err((StatusCode::UNAUTHORIZED, "Invalid signature"));
         }
 
@@ -124,6 +129,19 @@ fn hmac_sha256<T: AsRef<[u8]>>(data: &T) -> Result<String> {
             .finalize()
             .into_bytes(),
     ))
+}
+
+fn verify_hmac_sha256<T: AsRef<[u8]>>(data: &T, expected: String) -> Result<bool> {
+    let app_key = env::var("AXUM_SECRET").context("AXUM_SECRET not found")?;
+
+    let Ok(signature) = hex::decode(expected) else {
+        return Ok(false);
+    };
+
+    Ok(HmacSha256::new_from_slice(app_key.as_bytes())?
+        .chain_update(data)
+        .verify_slice(&signature)
+        .is_ok())
 }
 
 #[cfg(test)]
