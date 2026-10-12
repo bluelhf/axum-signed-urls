@@ -47,9 +47,10 @@ impl<S> FromRequestParts<S> for SignedUrl {
     type Rejection = (StatusCode, &'static str);
 
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        let url = parts.uri.path_and_query().unwrap();
+        let path = parts.uri.path();
+        let query_str = parts.uri.query().ok_or((StatusCode::UNAUTHORIZED, "Missing signature"))?;
 
-        let (signature_parts, other_parts): (Vec<_>, Vec<_>) = QString::from(url.query().unwrap())
+        let (signature_parts, other_parts): (Vec<_>, Vec<_>) = QString::from(query_str)
             .into_pairs()
             .into_iter()
             .partition(|(k, _)| k == "signature");
@@ -60,10 +61,10 @@ impl<S> FromRequestParts<S> for SignedUrl {
             .ok_or((StatusCode::UNAUTHORIZED, "Missing signature"))?;
 
         let query = QString::new(other_parts);
-        let unsigned_url = format!("{}{}", url.path(), stringify_query(&query));
+        let unsigned_url = format!("{}{}", path, stringify_query(&query));
 
-        if signature != hmac_sha256(&unsigned_url).unwrap() {
-            return Err((StatusCode::UNAUTHORIZED, "Missing signature"));
+        if signature != hmac_sha256(&unsigned_url).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Signing error"))? {
+            return Err((StatusCode::UNAUTHORIZED, "Invalid signature"));
         }
 
         Ok(SignedUrl)
@@ -184,7 +185,7 @@ mod tests {
 
         let err = SignedUrl::from_request(req, &()).await.unwrap_err();
 
-        assert_eq!(err, (StatusCode::UNAUTHORIZED, "Missing signature"));
+        assert_eq!(err, (StatusCode::UNAUTHORIZED, "Invalid signature"));
     }
 
     #[tokio::test]
@@ -193,6 +194,20 @@ mod tests {
 
         let req = Request::builder()
             .uri("https://example.com/hello?email=admin@example.com")
+            .body(())
+            .unwrap();
+
+        let err = SignedUrl::from_request(req, &()).await.unwrap_err();
+
+        assert_eq!(err, (StatusCode::UNAUTHORIZED, "Missing signature"));
+    }
+
+    #[tokio::test]
+    async fn throws_unauthorized_error_on_missing_query_string() {
+        env::set_var("AXUM_SECRET", "hunter2");
+
+        let req = Request::builder()
+            .uri("https://example.com/hello")
             .body(())
             .unwrap();
 
